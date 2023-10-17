@@ -1,0 +1,10 @@
+{
+  "name": "SoundCard Switch",
+  "description": "Turn On/Off SoundCard",
+  "uuid": "soundcard-switch@xnow.me",
+  "url": "https://github.com/xnow-me/soundcard-switch.git",
+  "shell-version": [
+    "42"
+  ],
+  "version": "0.5"
+}
