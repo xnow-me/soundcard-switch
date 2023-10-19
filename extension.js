@@ -28,15 +28,11 @@ const PanelMenu = imports.ui.panelMenu;
 const PopupMenu = imports.ui.popupMenu;
 
 const App = ExtensionUtils.getCurrentExtension();
-const Gettext = imports.gettext.domain(App.uuid);
-const _ = Gettext.gettext;
 
 let sourceId = null;
 const Indicator = GObject.registerClass(
 class Indicator extends PanelMenu.Button {
     _init() {
-        super._init(0.0, _('My Shiny Indicator'));
-
         this.icon = new St.Icon();
         this.add_child(this.icon);
 
