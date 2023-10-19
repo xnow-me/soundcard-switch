@@ -1,10 +1,11 @@
 {
   "name": "SoundCard Switch",
-  "description": "Turn On/Off SoundCard",
+  "description": "Turn On/Off SoundCard completely by add/remove the sound device. Just in case the computer suddenly makes a sound at an inappropriate time in a public place.",
   "uuid": "soundcard-switch@xnow.me",
+  "gettext-domain": "soundcard-switch@xnow.me",
   "url": "https://github.com/xnow-me/soundcard-switch.git",
   "shell-version": [
     "42"
   ],
-  "version": "1.0"
+  "version": "3.0"
 }

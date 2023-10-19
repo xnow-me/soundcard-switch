@@ -20,16 +20,18 @@
 
 const GETTEXT_DOMAIN = 'my-indicator-extension';
 
-const { GObject, St, Gio, GLib } = imports.gi;
+const {GObject, St, Gio, GLib} = imports.gi;
 
 const ExtensionUtils = imports.misc.extensionUtils;
 const Main = imports.ui.main;
 const PanelMenu = imports.ui.panelMenu;
 const PopupMenu = imports.ui.popupMenu;
 
-const _ = ExtensionUtils.gettext;
 const App = ExtensionUtils.getCurrentExtension();
+const Gettext = imports.gettext.domain(App.uuid);
+const _ = Gettext.gettext;
 
+let sourceId = null;
 const Indicator = GObject.registerClass(
 class Indicator extends PanelMenu.Button {
     _init() {
@@ -50,42 +52,47 @@ class Indicator extends PanelMenu.Button {
     }
 
     _log(msg) {
-        log("[" + App.uuid + "_" + App.metadata.version + "]" + ": " + msg);
+        console.log(`[${App.uuid}_${App.metadata.version}]: ${msg}`);
     }
 
+    _logException(ex) {
+        console.error(`[${App.uuid}_${App.metadata.version}]: ${ex.stack}, ${ex.message}`);
+    }
+
+
     _soundcard_status() {
-        let cmd="ls -d /sys/class/sound/card0/";
+        let cmd = 'ls -d /sys/class/sound/card0/';
         try {
             let [result, stdout, stderr, status] = GLib.spawn_command_line_sync(cmd);
             return status === 0;
         } catch (e) {
-            logError(e);
+            this._logException(e);
             return false;
         }
     }
 
-   _write_command(cmd) {
+    _write_command(cmd) {
         let proc = Gio.Subprocess.new(cmd, Gio.SubprocessFlags.STDIN_PIPE);
-        proc.communicate_utf8_async("1", null, (proc, res) => {
-            try{
-                let [ok, stdout,stderr] = proc.communicate_utf8_finish(res);
+        proc.communicate_utf8_async('1', null, (proc, res) => {
+            try {
+                let [ok, stdout, stderr] = proc.communicate_utf8_finish(res);
                 // delay 1s, than update icon and toggle state
                 // make sure the /sys/class/sound/card0/ dir show or disappear
-                GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT, 1, () => {
+                sourceId = GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT, 1, () => {
                     this._update_all();
                     return GLib.SOURCE_REMOVE;
-                })
-            }catch(e){
-                logError(e);
+                });
+            } catch (e) {
+                this._logException(e);
             }
-        })
+        });
     }
 
     _update_icon(status) {
-        let icon_status = status ? "enable": "disable";
-        let base_icon = App.path + '/icons/' + icon_status;
-        let file_icon = Gio.File.new_for_path(base_icon + '.svg');
-        let icon = Gio.icon_new_for_string(file_icon.get_path());
+        let iconStatus = status ? 'enable' : 'disable';
+        let baseIcon = `${App.path}/icons/${iconStatus}`;
+        let fileIcon = Gio.File.new_for_path(`${baseIcon}.svg`);
+        let icon = Gio.icon_new_for_string(fileIcon.get_path());
         this.icon.set_gicon(icon);
         this.icon.set_icon_size(26);
     }
@@ -99,7 +106,7 @@ class Indicator extends PanelMenu.Button {
         this._update_icon(status);
         this._update_toggle(status);
         if (this.last_status !== null && this.last_status !== status) {
-            let msg = "Turned SoundCard " + (status ? "On": "Off");
+            let msg = `Turned SoundCard ${status ? 'On' : 'Off'}`;
             Main.notify(msg);
             this._log(msg);
         }
@@ -108,10 +115,10 @@ class Indicator extends PanelMenu.Button {
 
     _onToggle(menuItem, state) {
         if (state) {
-            let cmd = ["pkexec", "tee", "/sys/bus/pci/rescan"];
+            let cmd = ['pkexec', 'tee', '/sys/bus/pci/rescan'];
             this._write_command(cmd);
         } else {
-            let cmd = ["pkexec", "tee", "/sys/class/sound/card0/device/remove"];
+            let cmd = ['pkexec', 'tee', '/sys/class/sound/card0/device/remove'];
             this._write_command(cmd);
         }
     }
@@ -132,9 +139,17 @@ class Extension {
     disable() {
         this._indicator.destroy();
         this._indicator = null;
+        if (sourceId) {
+            GLib.Source.remove(sourceId);
+            sourceId = null;
+        }
     }
 }
 
+/**
+ *
+ * @param meta
+ */
 function init(meta) {
     return new Extension(meta.uuid);
 }
