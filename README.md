@@ -3,17 +3,19 @@ Welcome to SoundCard Switch
 
 ## Description
 
-SoundCardSwitch is a Gnome Shell indicator extension that helps people completely disable/enable sound card of laptop when they are at office or other public place.
+SoundCard Switch is a Gnome Shell indicator extension designed to enable users to fully disable or enable their laptop's sound card.
 
-It's useful when you not want to make a sudden sound from you computer.
+This is particularly useful in office environments or other public places where unexpected sounds from your computer may be disruptive.
+
 
 ## Prerequisites
 
-SoundCard Switch is bring about by write data to files on sysfs, so `pkexec` is required to exec the privileged action.
+SoundCard Switch functions by writing data to files on sysfs. Therefore, pkexec is required to execute these privileged actions.
 
 ## Installation
 
-Go to the [https://extensions.gnome.org/](https://extensions.gnome.org/) Page, and search `SoundCardSwitch`, then enable it by a simple click.
+
+To install SoundCard Switch, visit the [Gnome Extensions](https://extensions.gnome.org/) page, search for SoundCardSwitch, and enable it with a simple click.
 
 ## Screenshot
 

@@ -1,6 +1,6 @@
 {
   "name": "SoundCard Switch",
-  "description": "Turn On/Off SoundCard completely by add/remove the sound device. Just in case the computer suddenly makes a sound at an inappropriate time in a public place.",
+  "description": "Enable or disable the sound card entirely by adding or removing the sound device. This precaution prevents the computer from unexpectedly making noise at inopportune moments in public places.",
   "uuid": "soundcard-switch@xnow.me",
   "url": "https://github.com/xnow-me/soundcard-switch.git",
   "shell-version": [
