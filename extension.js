@@ -18,7 +18,6 @@
 
 /* exported init */
 
-const GETTEXT_DOMAIN = 'my-indicator-extension';
 
 const {GObject, St, Gio, GLib} = imports.gi;
 
@@ -33,6 +32,7 @@ let sourceId = null;
 const Indicator = GObject.registerClass(
 class Indicator extends PanelMenu.Button {
     _init() {
+        super._init(0.0);
         this.icon = new St.Icon();
         this.add_child(this.icon);
 
@@ -76,6 +76,7 @@ class Indicator extends PanelMenu.Button {
                 // make sure the /sys/class/sound/card0/ dir show or disappear
                 sourceId = GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT, 1, () => {
                     this._update_all();
+                    sourceId = null;
                     return GLib.SOURCE_REMOVE;
                 });
             } catch (e) {
@@ -124,7 +125,7 @@ class Extension {
     constructor(uuid) {
         this._uuid = uuid;
 
-        ExtensionUtils.initTranslations(GETTEXT_DOMAIN);
+        ExtensionUtils.initTranslations();
     }
 
     enable() {
