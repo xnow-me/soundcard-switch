@@ -1,13 +1,12 @@
 {
-  "name": "SoundCard Switch",
   "description": "Enable or disable the sound card entirely by adding or removing the sound device. Bluetooth headset not be affected.",
-  "uuid": "soundcard-switch@xnow.me",
   "gettext-domain": "soundcard-switch@xnow.me",
-  "url": "https://github.com/xnow-me/soundcard-switch.git",
+  "name": "SoundCard Switch",
   "shell-version": [
-    "42",
-    "43",
-    "44"
+    "45",
+    "46"
   ],
-  "version": "7.0"
+  "url": "https://github.com/xnow-me/soundcard-switch.git",
+  "uuid": "soundcard-switch@xnow.me",
+  "version": 6
 }
