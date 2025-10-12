@@ -4,7 +4,9 @@
   "name": "SoundCard Switch",
   "shell-version": [
     "45",
-    "46"
+    "46",
+    "47",
+    "48"
   ],
   "url": "https://github.com/xnow-me/soundcard-switch.git",
   "uuid": "soundcard-switch@xnow.me",

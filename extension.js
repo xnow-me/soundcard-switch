@@ -58,46 +58,109 @@ const Indicator = GObject.registerClass(
       super.destroy();
     }
 
-    _log(msg) {
-      console.log(
-        `[${this.extensionObject.uuid}_${this.extensionObject.metadata.version}]: ${msg}`,
+    // get audio device kernel modules from lspci -k output
+    _get_audio_modules() {
+      let cmd = "lspci -k";
+
+      let [ok, stdout, stderr, status] = GLib.spawn_command_line_sync(cmd);
+      if (status !== 0) {
+        logError(`Error getting module list: ${stderr}`);
+        return "";
+      }
+
+      let stdout_parts = new TextDecoder().decode(stdout).split("\n");
+      let find_audio_line = null;
+      let audio_module_line = null;
+      for (let i = 0; i < stdout_parts.length; i++) {
+        if (stdout_parts[i].toLowerCase().includes("audio device:")) {
+          find_audio_line = true;
+          continue;
+        }
+        if (
+          find_audio_line &&
+          stdout_parts[i].toLowerCase().includes("kernel modules:")
+        ) {
+          audio_module_line = stdout_parts[i];
+          break;
+        }
+      }
+
+      let modules = audio_module_line
+        .split(":")[1]
+        .split(",")
+        .map((s) => s.trim());
+      return modules;
+    }
+
+    _exec_async(cmd, callback = null, errorCallback = null) {
+      let proc = Gio.Subprocess.new(
+        cmd, // like ["ls", "-a"]
+        Gio.SubprocessFlags.STDOUT_PIPE | Gio.SubprocessFlags.STDERR_PIPE,
+      );
+
+      proc.communicate_utf8_async(null, null, (source, result) => {
+        try {
+          let [ok, stdout, stderr] = source.communicate_utf8_finish(result);
+          if (ok) {
+            log(`Executed ${cmd} successfully!`);
+            if (callback) callback();
+          } else {
+            logError(`Command ${cmd} failed with status: ` + ok);
+            logError("Error Output: " + stderr);
+            if (errorCallback) errorCallback(stderr);
+          }
+          return [ok, stdout, stderr];
+        } catch (e) {
+          logError(`Error executing ${cmd} command: ` + e.message);
+          if (errorCallback) errorCallback(e.message);
+        }
+      });
+    }
+
+    // update all status after sec seconds
+    _update_all_after_second(sec) {
+      this.sourceId = GLib.timeout_add_seconds(
+        GLib.PRIORITY_DEFAULT,
+        sec,
+        () => {
+          this._update_all();
+          this.sourceId = null;
+          return GLib.SOURCE_REMOVE;
+        },
       );
     }
 
-    _logException(ex) {
-      console.error(
-        `[${this.extensionObject.uuid}_${this.extensionObject.metadata.version}]: ${ex.stack}, ${ex.message}`,
-      );
+    // unload audio device kernel modules by modprobe -r
+    _unload_audio_module() {
+      let audio_module = this._get_audio_modules();
+      let cmd = ["pkexec", "/sbin/modprobe", "-ar"].concat(audio_module);
+      log(`Unloading module: ${audio_module}, with cmd: ${cmd}`);
+
+      this._exec_async(cmd, () => {
+        this._update_all_after_second(1);
+      });
+    }
+
+    // load audio device kernel modules by modprobe -a
+    _load_audio_module() {
+      let audio_module = this._get_audio_modules();
+      let cmd = ["pkexec", "/sbin/modprobe", "-a"].concat(audio_module);
+      log(`Loading module: ${audio_module}, with cmd: ${cmd}`);
+
+      this._exec_async(cmd, () => {
+        this._update_all_after_second(1);
+      });
     }
 
     _soundcard_status() {
       let cmd = "ls -d /sys/class/sound/card0/";
       try {
-        let [result, stdout, stderr, status] =
-          GLib.spawn_command_line_sync(cmd);
+        let [ok, stdout, stderr, status] = GLib.spawn_command_line_sync(cmd);
         return status === 0;
       } catch (e) {
-        this._logException(e);
+        logError(e);
         return false;
       }
-    }
-
-    _write_command(cmd) {
-      let proc = Gio.Subprocess.new(cmd, Gio.SubprocessFlags.STDIN_PIPE);
-      proc.communicate_utf8_async("1", null, (proc, res) => {
-        try {
-          let [ok, stdout, stderr] = proc.communicate_utf8_finish(res);
-          // delay 1s, than update icon and toggle state
-          // make sure the /sys/class/sound/card0/ dir show or disappear
-          sourceId = GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT, 1, () => {
-            this._update_all();
-            sourceId = null;
-            return GLib.SOURCE_REMOVE;
-          });
-        } catch (e) {
-          this._logException(e);
-        }
-      });
     }
 
     _update_icon(status) {
@@ -113,24 +176,23 @@ const Indicator = GObject.registerClass(
       this.menuItem.setToggleState(status);
     }
 
+    // update icon and toggle status
     _update_all() {
       let status = this._soundcard_status();
       this._update_icon(status);
       this._update_toggle(status);
       if (this.last_status !== null && this.last_status !== status) {
         let msg = `Turned SoundCard ${status ? "On" : "Off"}`;
-        this._log(msg);
+        log(msg);
       }
       this.last_status = status;
     }
 
     _onToggle(menuItem, state) {
       if (state) {
-        let cmd = ["pkexec", "tee", "/sys/bus/pci/rescan"];
-        this._write_command(cmd);
+        this._load_audio_module();
       } else {
-        let cmd = ["pkexec", "tee", "/sys/class/sound/card0/device/remove"];
-        this._write_command(cmd);
+        this._unload_audio_module();
       }
     }
   },
