@@ -58,13 +58,25 @@ const Indicator = GObject.registerClass(
       super.destroy();
     }
 
+    _log(msg) {
+      console.log(
+        `[${this.extensionObject.uuid}_${this.extensionObject.metadata.version}]: ${msg}`,
+      );
+    }
+
+    _logException(ex) {
+      console.error(
+        `[${this.extensionObject.uuid}_${this.extensionObject.metadata.version}]: ${ex.stack}, ${ex.message}`,
+      );
+    }
+
     // get audio device kernel modules from lspci -k output
     _get_audio_modules() {
       let cmd = "lspci -k";
 
-      let [ok, stdout, stderr, status] = GLib.spawn_command_line_sync(cmd);
+      let [_ok, stdout, stderr, status] = GLib.spawn_command_line_sync(cmd);
       if (status !== 0) {
-        logError(`Error getting module list: ${stderr}`);
+        this._logException(`Error getting module list: ${stderr}`);
         return "";
       }
 
@@ -102,16 +114,16 @@ const Indicator = GObject.registerClass(
         try {
           let [ok, stdout, stderr] = source.communicate_utf8_finish(result);
           if (ok) {
-            log(`Executed ${cmd} successfully!`);
+            this._log(`Executed ${cmd} successfully!`);
             if (callback) callback();
           } else {
-            logError(`Command ${cmd} failed with status: ` + ok);
-            logError("Error Output: " + stderr);
+            this._log(`Command ${cmd} failed with status: ` + ok);
+            this._logException("Error Output: " + stderr);
             if (errorCallback) errorCallback(stderr);
           }
           return [ok, stdout, stderr];
         } catch (e) {
-          logError(`Error executing ${cmd} command: ` + e.message);
+          this._logException(`Error executing ${cmd} command: ` + e.message);
           if (errorCallback) errorCallback(e.message);
         }
       });
@@ -134,7 +146,7 @@ const Indicator = GObject.registerClass(
     _unload_audio_module() {
       let audio_module = this._get_audio_modules();
       let cmd = ["pkexec", "/sbin/modprobe", "-ar"].concat(audio_module);
-      log(`Unloading module: ${audio_module}, with cmd: ${cmd}`);
+      this._log(`Unloading module: ${audio_module}, with cmd: ${cmd}`);
 
       this._exec_async(cmd, () => {
         this._update_all_after_second(1);
@@ -145,7 +157,7 @@ const Indicator = GObject.registerClass(
     _load_audio_module() {
       let audio_module = this._get_audio_modules();
       let cmd = ["pkexec", "/sbin/modprobe", "-a"].concat(audio_module);
-      log(`Loading module: ${audio_module}, with cmd: ${cmd}`);
+      this._log(`Loading module: ${audio_module}, with cmd: ${cmd}`);
 
       this._exec_async(cmd, () => {
         this._update_all_after_second(1);
@@ -155,10 +167,10 @@ const Indicator = GObject.registerClass(
     _soundcard_status() {
       let cmd = "ls -d /sys/class/sound/card0/";
       try {
-        let [ok, stdout, stderr, status] = GLib.spawn_command_line_sync(cmd);
+        let [_ok, _stdout, _stderr, status] = GLib.spawn_command_line_sync(cmd);
         return status === 0;
       } catch (e) {
-        logError(e);
+        this._logException(e);
         return false;
       }
     }
@@ -183,7 +195,7 @@ const Indicator = GObject.registerClass(
       this._update_toggle(status);
       if (this.last_status !== null && this.last_status !== status) {
         let msg = `Turned SoundCard ${status ? "On" : "Off"}`;
-        log(msg);
+        this._log(msg);
       }
       this.last_status = status;
     }
