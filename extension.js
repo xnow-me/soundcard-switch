@@ -29,7 +29,7 @@ import * as PopupMenu from "resource:///org/gnome/shell/ui/popupMenu.js";
 
 import { Extension } from "resource:///org/gnome/shell/extensions/extension.js";
 
-let sourceId = null;
+let updateSourceId = null;
 const Indicator = GObject.registerClass(
   class Indicator extends PanelMenu.Button {
     _init(extensionObject) {
@@ -38,6 +38,7 @@ const Indicator = GObject.registerClass(
       this.extensionObject = extensionObject;
       this.lastActiveModules = [];
       this.add_child(this.icon);
+      this._destroyed = false;
 
       this.menuItem = new PopupMenu.PopupSwitchMenuItem(
         "Sound Card",
@@ -53,9 +54,10 @@ const Indicator = GObject.registerClass(
     }
 
     destroy() {
-      if (sourceId) {
-        GLib.Source.remove(sourceId);
-        sourceId = null;
+      this._destroyed = true;
+      if (updateSourceId) {
+        GLib.Source.remove(updateSourceId);
+        updateSourceId = null;
       }
       super.destroy();
     }
@@ -108,57 +110,43 @@ const Indicator = GObject.registerClass(
     }
 
     /**
-     * Run lspci and return the raw PCI device listing with kernel modules.
+     * Run lspci asynchronously and pass the raw PCI device listing to callback.
      *
      * Example output:
      * 0000:00:1f.3 Audio device: Intel Corporation Device 7a50
      *     Kernel modules: snd_hda_intel
      *
-     * @returns {string} Raw lspci output, or an empty string on failure.
+     * @param {Function} callback - Function called with raw lspci output.
+     * @returns {void}
      */
-    _run_lspci() {
+    _run_lspci(callback) {
+      let subprocess;
       try {
-        let proc = Gio.Subprocess.new(
+        subprocess = Gio.Subprocess.new(
           [this._get_lspci_path(), "-D", "-k"],
           Gio.SubprocessFlags.STDOUT_PIPE | Gio.SubprocessFlags.STDERR_PIPE,
         );
-        let [, stdout, stderr] = proc.communicate_utf8(null, null);
-        if (!proc.get_successful()) {
-          let errorMessage = stderr ? stderr.trim() : "";
-          this._log(errorMessage || "Failed to list PCI devices");
-          return "";
-        }
-        return stdout;
       } catch (e) {
         this._logException(e);
-        return "";
+        callback("");
+        return;
       }
-    }
 
-    _get_module_name(modulePath) {
-      let parts = modulePath.split("/");
-      return parts[parts.length - 1] || null;
-    }
-
-    /**
-     * Read the active kernel module for one PCI device from sysfs.
-     *
-     * Example input: 0000:00:1f.3
-     * Example output: snd_hda_intel
-     *
-     * @param {string} pciAddress - Full PCI address from lspci -D output.
-     * @returns {string|null} Active module name, or null if no module link exists.
-     */
-    _get_active_module_from_sysfs(pciAddress) {
-      try {
-        // The sysfs driver/module link points to the real kernel module.
-        let modulePath = GLib.file_read_link(
-          `/sys/bus/pci/devices/${pciAddress}/driver/module`,
-        );
-        return this._get_module_name(modulePath);
-      } catch (e_) {
-        return null;
-      }
+      subprocess.communicate_utf8_async(null, null, (proc, res) => {
+        try {
+          let [, stdout, stderr] = proc.communicate_utf8_finish(res);
+          if (!proc.get_successful()) {
+            let errorMessage = stderr ? stderr.trim() : "";
+            this._log(errorMessage || "Failed to list PCI devices");
+            callback("");
+            return;
+          }
+          callback(stdout || "");
+        } catch (e) {
+          this._logException(e);
+          callback("");
+        }
+      });
     }
 
     /**
@@ -178,12 +166,12 @@ const Indicator = GObject.registerClass(
      *   },
      * ]
      *
+     * @param {string} lspciOutput - Raw lspci output.
      * @returns {Array<Object>} Audio device records with active and candidate modules.
      */
-    _get_audio_module_infos() {
+    _parse_audio_module_infos(lspciOutput) {
       let moduleInfos = [];
       let currentInfo = null;
-      let lspciOutput = this._run_lspci();
 
       for (let line of lspciOutput.split("\n")) {
         // lspci -D prints the full PCI address used by /sys/bus/pci/devices.
@@ -225,6 +213,47 @@ const Indicator = GObject.registerClass(
       }
 
       return moduleInfos;
+    }
+
+    /**
+     * Get audio device module records asynchronously.
+     *
+     * Example output:
+     * [{activeModule: "snd_hda_intel", candidateModules: ["snd_hda_intel"]}]
+     *
+     * @param {Function} callback - Function called with audio module records.
+     * @returns {void}
+     */
+    _get_audio_module_infos(callback) {
+      this._run_lspci(lspciOutput => {
+        callback(this._parse_audio_module_infos(lspciOutput));
+      });
+    }
+
+    _get_module_name(modulePath) {
+      let parts = modulePath.split("/");
+      return parts[parts.length - 1] || null;
+    }
+
+    /**
+     * Read the active kernel module for one PCI device from sysfs.
+     *
+     * Example input: 0000:00:1f.3
+     * Example output: snd_hda_intel
+     *
+     * @param {string} pciAddress - Full PCI address from lspci -D output.
+     * @returns {string|null} Active module name, or null if no module link exists.
+     */
+    _get_active_module_from_sysfs(pciAddress) {
+      try {
+        // The sysfs driver/module link points to the real kernel module.
+        let modulePath = GLib.file_read_link(
+          `/sys/bus/pci/devices/${pciAddress}/driver/module`,
+        );
+        return this._get_module_name(modulePath);
+      } catch (e_) {
+        return null;
+      }
     }
 
     _unique_modules(modules) {
@@ -288,14 +317,18 @@ const Indicator = GObject.registerClass(
     }
 
     _schedule_update() {
-      if (sourceId) {
-        GLib.Source.remove(sourceId);
+      if (this._destroyed) {
+        return;
+      }
+
+      if (updateSourceId) {
+        GLib.Source.remove(updateSourceId);
       }
       // delay 1s, then update icon and toggle state
       // make sure the kernel module state has settled
-      sourceId = GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT, 1, () => {
+      updateSourceId = GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT, 1, () => {
         this._update_all();
-        sourceId = null;
+        updateSourceId = null;
         return GLib.SOURCE_REMOVE;
       });
     }
@@ -412,11 +445,16 @@ const Indicator = GObject.registerClass(
      * @returns {void}
      */
     _onToggle(_menuItem, state) {
-      let moduleInfos = this._get_audio_module_infos();
-      let modules = state
-        ? this._get_loadable_modules(moduleInfos)
-        : this._get_active_modules(moduleInfos);
-      this._run_modprobe(modules, !state);
+      this._get_audio_module_infos(moduleInfos => {
+        if (this._destroyed) {
+          return;
+        }
+
+        let modules = state
+          ? this._get_loadable_modules(moduleInfos)
+          : this._get_active_modules(moduleInfos);
+        this._run_modprobe(modules, !state);
+      });
     }
   },
 );
