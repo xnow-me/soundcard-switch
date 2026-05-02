@@ -1,5 +1,5 @@
 {
-  "description": "Enable or disable the sound card entirely by loading or unloading the sound card kernel module. Bluetooth headset not be affected.",
+  "description": "Enable or disable the sound card entirely by loading or unloading the sound card kernel module. Bluetooth headsets are not affected.",
   "gettext-domain": "soundcard-switch@xnow.me",
   "name": "SoundCard Switch",
   "shell-version": [
@@ -10,5 +10,5 @@
   ],
   "url": "https://github.com/xnow-me/soundcard-switch.git",
   "uuid": "soundcard-switch@xnow.me",
-  "version": 9
+  "version-name": "9"
 }

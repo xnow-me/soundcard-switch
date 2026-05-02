@@ -16,8 +16,6 @@
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
 
-/* exported init */
-
 import GObject from "gi://GObject";
 import St from "gi://St";
 import Gio from "gi://Gio";
@@ -29,7 +27,6 @@ import * as PopupMenu from "resource:///org/gnome/shell/ui/popupMenu.js";
 
 import { Extension } from "resource:///org/gnome/shell/extensions/extension.js";
 
-let updateSourceId = null;
 const Indicator = GObject.registerClass(
   class Indicator extends PanelMenu.Button {
     _init(extensionObject) {
@@ -39,12 +36,17 @@ const Indicator = GObject.registerClass(
       this.lastActiveModules = [];
       this.add_child(this.icon);
       this._destroyed = false;
+      this._toggleSignalId = null;
+      this._updateSourceId = null;
 
       this.menuItem = new PopupMenu.PopupSwitchMenuItem(
         "Sound Card",
         this._soundcard_status(),
       );
-      this.menuItem.connect("toggled", this._onToggle.bind(this));
+      this._toggleSignalId = this.menuItem.connect(
+        "toggled",
+        this._onToggle.bind(this),
+      );
 
       this.menu.addMenuItem(this.menuItem);
 
@@ -55,26 +57,35 @@ const Indicator = GObject.registerClass(
 
     destroy() {
       this._destroyed = true;
-      if (updateSourceId) {
-        GLib.Source.remove(updateSourceId);
-        updateSourceId = null;
+      if (this._toggleSignalId) {
+        this.menuItem.disconnect(this._toggleSignalId);
+        this._toggleSignalId = null;
+      }
+      if (this._updateSourceId) {
+        GLib.Source.remove(this._updateSourceId);
+        this._updateSourceId = null;
       }
       super.destroy();
     }
 
     _log(msg) {
+      let version = this.extensionObject.metadata["version-name"] || "unknown";
       console.log(
-        `[${this.extensionObject.uuid}_${this.extensionObject.metadata.version}]: ${msg}`,
+        `[${this.extensionObject.uuid}_${version}]: ${msg}`,
       );
     }
 
     _logException(ex) {
+      let version = this.extensionObject.metadata["version-name"] || "unknown";
       console.error(
-        `[${this.extensionObject.uuid}_${this.extensionObject.metadata.version}]: ${ex.stack}, ${ex.message}`,
+        `[${this.extensionObject.uuid}_${version}]: ${ex.stack}, ${ex.message}`,
       );
     }
 
     _notify_result(message) {
+      if (this._destroyed) {
+        return;
+      }
       Main.notify(this.extensionObject.metadata.name, message);
     }
 
@@ -102,30 +113,27 @@ const Indicator = GObject.registerClass(
       return GLib.file_test("/sys/class/sound/card0/", GLib.FileTest.IS_DIR);
     }
 
-    _find_executable(commandName, fallbackPaths) {
-      let programPath = GLib.find_program_in_path(commandName);
-      if (programPath) {
-        return programPath;
-      }
-
-      for (let fallbackPath of fallbackPaths) {
-        if (GLib.file_test(fallbackPath, GLib.FileTest.IS_EXECUTABLE)) {
-          return fallbackPath;
+    _find_system_executable(paths) {
+      for (let path of paths) {
+        if (GLib.file_test(path, GLib.FileTest.IS_EXECUTABLE)) {
+          return path;
         }
       }
 
-      return commandName;
+      return null;
     }
 
     _get_lspci_path() {
-      return this._find_executable("lspci", [
+      return this._find_system_executable([
         "/usr/bin/lspci",
         "/bin/lspci",
+        "/usr/sbin/lspci",
+        "/sbin/lspci",
       ]);
     }
 
     _get_modprobe_path() {
-      return this._find_executable("modprobe", [
+      return this._find_system_executable([
         "/usr/sbin/modprobe",
         "/sbin/modprobe",
         "/usr/bin/modprobe",
@@ -144,10 +152,17 @@ const Indicator = GObject.registerClass(
      * @returns {void}
      */
     _run_lspci(callback) {
+      let lspciPath = this._get_lspci_path();
+      if (!lspciPath) {
+        this._log("lspci executable not found in trusted system paths");
+        callback("");
+        return;
+      }
+
       let subprocess;
       try {
         subprocess = Gio.Subprocess.new(
-          [this._get_lspci_path(), "-D", "-k"],
+          [lspciPath, "-D", "-k"],
           Gio.SubprocessFlags.STDOUT_PIPE | Gio.SubprocessFlags.STDERR_PIPE,
         );
       } catch (e) {
@@ -157,6 +172,10 @@ const Indicator = GObject.registerClass(
       }
 
       subprocess.communicate_utf8_async(null, null, (proc, res) => {
+        if (this._destroyed) {
+          return;
+        }
+
         try {
           let [, stdout, stderr] = proc.communicate_utf8_finish(res);
           if (!proc.get_successful()) {
@@ -345,19 +364,28 @@ const Indicator = GObject.registerClass(
         return;
       }
 
-      if (updateSourceId) {
-        GLib.Source.remove(updateSourceId);
+      if (this._updateSourceId) {
+        GLib.Source.remove(this._updateSourceId);
       }
       // delay 1s, then update icon and toggle state
       // make sure the kernel module state has settled
-      updateSourceId = GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT, 1, () => {
-        let status = this._update_all();
-        updateSourceId = null;
-        if (callback) {
-          callback(status);
-        }
-        return GLib.SOURCE_REMOVE;
-      });
+      this._updateSourceId = GLib.timeout_add_seconds(
+        GLib.PRIORITY_DEFAULT,
+        1,
+        () => {
+          if (this._destroyed) {
+            this._updateSourceId = null;
+            return GLib.SOURCE_REMOVE;
+          }
+
+          let status = this._update_all();
+          this._updateSourceId = null;
+          if (callback) {
+            callback(status);
+          }
+          return GLib.SOURCE_REMOVE;
+        },
+      );
     }
 
     /**
@@ -385,6 +413,10 @@ const Indicator = GObject.registerClass(
       }
 
       subprocess.communicate_utf8_async(null, null, (proc, res) => {
+        if (this._destroyed) {
+          return;
+        }
+
         try {
           let [, stdout, stderr] = proc.communicate_utf8_finish(res);
           if (!proc.get_successful()) {
@@ -435,7 +467,15 @@ const Indicator = GObject.registerClass(
         return;
       }
 
-      let cmd = ["pkexec", this._get_modprobe_path()];
+      let modprobePath = this._get_modprobe_path();
+      if (!modprobePath) {
+        this._log("modprobe executable not found in trusted system paths");
+        this._notify_result("modprobe executable not found");
+        this._schedule_update();
+        return;
+      }
+
+      let cmd = ["pkexec", modprobePath];
       // pkexec fits GNOME's graphical auth flow; modprobe resolves module
       // paths and dependencies better than calling insmod/rmmod directly.
       if (remove) {
@@ -507,6 +547,10 @@ export default class SoundcardExtension extends Extension {
   }
 
   disable() {
+    if (!this._indicator) {
+      return;
+    }
+
     this._indicator.destroy();
     this._indicator = null;
   }
