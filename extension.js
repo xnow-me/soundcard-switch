@@ -36,6 +36,7 @@ const Indicator = GObject.registerClass(
       super._init(0.0);
       this.icon = new St.Icon();
       this.extensionObject = extensionObject;
+      this.lastActiveModules = [];
       this.add_child(this.icon);
 
       this.menuItem = new PopupMenu.PopupSwitchMenuItem(
@@ -50,6 +51,7 @@ const Indicator = GObject.registerClass(
       // init to correct status
       this._update_all();
     }
+
     destroy() {
       if (sourceId) {
         GLib.Source.remove(sourceId);
@@ -71,33 +73,305 @@ const Indicator = GObject.registerClass(
     }
 
     _soundcard_status() {
-      let cmd = "ls -d /sys/class/sound/card0/";
+      return GLib.file_test("/sys/class/sound/card0/", GLib.FileTest.IS_DIR);
+    }
+
+    _find_executable(commandName, fallbackPaths) {
+      let programPath = GLib.find_program_in_path(commandName);
+      if (programPath) {
+        return programPath;
+      }
+
+      for (let fallbackPath of fallbackPaths) {
+        if (GLib.file_test(fallbackPath, GLib.FileTest.IS_EXECUTABLE)) {
+          return fallbackPath;
+        }
+      }
+
+      return commandName;
+    }
+
+    _get_lspci_path() {
+      return this._find_executable("lspci", [
+        "/usr/bin/lspci",
+        "/bin/lspci",
+      ]);
+    }
+
+    _get_modprobe_path() {
+      return this._find_executable("modprobe", [
+        "/usr/sbin/modprobe",
+        "/sbin/modprobe",
+        "/usr/bin/modprobe",
+        "/bin/modprobe",
+      ]);
+    }
+
+    /**
+     * Run lspci and return the raw PCI device listing with kernel modules.
+     *
+     * Example output:
+     * 0000:00:1f.3 Audio device: Intel Corporation Device 7a50
+     *     Kernel modules: snd_hda_intel
+     *
+     * @returns {string} Raw lspci output, or an empty string on failure.
+     */
+    _run_lspci() {
       try {
-        let [result, stdout, stderr, status] =
-          GLib.spawn_command_line_sync(cmd);
-        return status === 0;
+        let proc = Gio.Subprocess.new(
+          [this._get_lspci_path(), "-D", "-k"],
+          Gio.SubprocessFlags.STDOUT_PIPE | Gio.SubprocessFlags.STDERR_PIPE,
+        );
+        let [, stdout, stderr] = proc.communicate_utf8(null, null);
+        if (!proc.get_successful()) {
+          let errorMessage = stderr ? stderr.trim() : "";
+          this._log(errorMessage || "Failed to list PCI devices");
+          return "";
+        }
+        return stdout;
       } catch (e) {
         this._logException(e);
-        return false;
+        return "";
       }
     }
 
-    _write_command(cmd) {
-      let proc = Gio.Subprocess.new(cmd, Gio.SubprocessFlags.STDIN_PIPE);
-      proc.communicate_utf8_async("1", null, (proc, res) => {
+    _get_module_name(modulePath) {
+      let parts = modulePath.split("/");
+      return parts[parts.length - 1] || null;
+    }
+
+    /**
+     * Read the active kernel module for one PCI device from sysfs.
+     *
+     * Example input: 0000:00:1f.3
+     * Example output: snd_hda_intel
+     *
+     * @param {string} pciAddress - Full PCI address from lspci -D output.
+     * @returns {string|null} Active module name, or null if no module link exists.
+     */
+    _get_active_module_from_sysfs(pciAddress) {
+      try {
+        // The sysfs driver/module link points to the real kernel module.
+        let modulePath = GLib.file_read_link(
+          `/sys/bus/pci/devices/${pciAddress}/driver/module`,
+        );
+        return this._get_module_name(modulePath);
+      } catch (e_) {
+        return null;
+      }
+    }
+
+    /**
+     * Parse lspci output into audio device module records.
+     *
+     * activeModule comes from sysfs, while candidateModules comes from the
+     * lspci "Kernel modules" line. Only PCI devices whose lspci header line
+     * contains "audio" are included.
+     *
+     * Example output:
+     * [
+     *   {
+     *     activeModule: "snd_hda_intel",
+     *     candidateModules: ["snd_hda_intel"],
+     *     deviceName: "Audio device: Intel Corporation Device 7a50",
+     *     pciAddress: "0000:00:1f.3",
+     *   },
+     * ]
+     *
+     * @returns {Array<Object>} Audio device records with active and candidate modules.
+     */
+    _get_audio_module_infos() {
+      let moduleInfos = [];
+      let currentInfo = null;
+      let lspciOutput = this._run_lspci();
+
+      for (let line of lspciOutput.split("\n")) {
+        // lspci -D prints the full PCI address used by /sys/bus/pci/devices.
+        let deviceMatch = line.match(
+          /^([0-9a-fA-F]{4}:[0-9a-fA-F]{2}:[0-9a-fA-F]{2}\.[0-7])\s+/,
+        );
+        if (deviceMatch) {
+          if (currentInfo) {
+            moduleInfos.push(currentInfo);
+          }
+
+          let pciAddress = deviceMatch[1];
+          currentInfo = /\baudio\b/i.test(line)
+            ? {
+                activeModule: this._get_active_module_from_sysfs(pciAddress),
+                candidateModules: [],
+                deviceName: line.slice(pciAddress.length).trim(),
+                pciAddress,
+              }
+            : null;
+          continue;
+        }
+
+        if (!currentInfo) {
+          continue;
+        }
+
+        let modulesMatch = line.match(/^\s*Kernel modules:\s*(.+)$/);
+        if (modulesMatch) {
+          currentInfo.candidateModules = modulesMatch[1]
+            .split(",")
+            .map(moduleName => moduleName.trim())
+            .filter(moduleName => moduleName);
+        }
+      }
+
+      if (currentInfo) {
+        moduleInfos.push(currentInfo);
+      }
+
+      return moduleInfos;
+    }
+
+    _unique_modules(modules) {
+      let seen = new Set();
+      return modules.filter(moduleName => {
+        if (seen.has(moduleName)) {
+          return false;
+        }
+        seen.add(moduleName);
+        return true;
+      });
+    }
+
+    /**
+     * Get currently active audio modules from parsed audio device records.
+     *
+     * Non-empty output is cached in lastActiveModules so the extension can
+     * later reload the same modules after they have been removed.
+     *
+     * Example input: [{activeModule: "snd_hda_intel"}, {activeModule: null}]
+     * Example output: ["snd_hda_intel"]
+     *
+     * @param {Array<Object>} moduleInfos - Audio device records.
+     * @returns {Array<string>} Unique active module names.
+     */
+    _get_active_modules(moduleInfos) {
+      let activeModules = this._unique_modules(
+        moduleInfos
+          .map(moduleInfo => moduleInfo.activeModule)
+          .filter(moduleName => moduleName),
+      );
+      if (activeModules.length > 0) {
+        this.lastActiveModules = activeModules;
+      }
+      return activeModules;
+    }
+
+    /**
+     * Choose modules to load when turning the sound card back on.
+     *
+     * If modules were previously active, they are reused. Otherwise this
+     * falls back to all modules listed in each device's candidateModules.
+     *
+     * Example input:
+     * [{candidateModules: ["snd_hda_intel", "snd_soc_avs"]}]
+     * Example output when no cache exists: ["snd_hda_intel", "snd_soc_avs"]
+     *
+     * @param {Array<Object>} moduleInfos - Audio device records.
+     * @returns {Array<string>} Unique module names to pass to modprobe.
+     */
+    _get_loadable_modules(moduleInfos) {
+      if (this.lastActiveModules.length > 0) {
+        return this.lastActiveModules;
+      }
+
+      return this._unique_modules(
+        moduleInfos
+          .flatMap(moduleInfo => moduleInfo.candidateModules)
+          .filter(moduleName => moduleName),
+      );
+    }
+
+    _schedule_update() {
+      if (sourceId) {
+        GLib.Source.remove(sourceId);
+      }
+      // delay 1s, then update icon and toggle state
+      // make sure the kernel module state has settled
+      sourceId = GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT, 1, () => {
+        this._update_all();
+        sourceId = null;
+        return GLib.SOURCE_REMOVE;
+      });
+    }
+
+    /**
+     * Run a command asynchronously, log failures, and refresh the UI afterward.
+     *
+     * Example input: ["pkexec", "modprobe", "-r", "snd_hda_intel"]
+     * Example output: no direct return value; failed stderr/stdout is logged.
+     *
+     * @param {Array<string>} cmd - Command and arguments to execute.
+     * @returns {void}
+     */
+    _run_command(cmd) {
+      let subprocess;
+      try {
+        subprocess = Gio.Subprocess.new(
+          cmd,
+          Gio.SubprocessFlags.STDOUT_PIPE | Gio.SubprocessFlags.STDERR_PIPE,
+        );
+      } catch (e) {
+        this._logException(e);
+        this._schedule_update();
+        return;
+      }
+
+      subprocess.communicate_utf8_async(null, null, (proc, res) => {
         try {
-          let [ok, stdout, stderr] = proc.communicate_utf8_finish(res);
-          // delay 1s, than update icon and toggle state
-          // make sure the /sys/class/sound/card0/ dir show or disappear
-          sourceId = GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT, 1, () => {
-            this._update_all();
-            sourceId = null;
-            return GLib.SOURCE_REMOVE;
-          });
+          let [, stdout, stderr] = proc.communicate_utf8_finish(res);
+          if (!proc.get_successful()) {
+            let errorMessage = stderr ? stderr.trim() : "";
+            let outputMessage = stdout ? stdout.trim() : "";
+            this._log(
+              errorMessage ||
+                outputMessage ||
+                `Command failed with status ${proc.get_exit_status()}`,
+            );
+          }
+          this._schedule_update();
         } catch (e) {
           this._logException(e);
+          this._schedule_update();
         }
       });
+    }
+
+    /**
+     * Build and run the privileged modprobe command for audio modules.
+     *
+     * Example input: modules ["snd_hda_intel"], remove true
+     * Example command: ["pkexec", "/usr/sbin/modprobe", "-r", "snd_hda_intel"]
+     *
+     * Example input: modules ["snd_hda_intel", "snd_soc_avs"], remove false
+     * Example command: ["pkexec", "/usr/sbin/modprobe", "-a", "snd_hda_intel", "snd_soc_avs"]
+     *
+     * @param {Array<string>} modules - Kernel modules to load or remove.
+     * @param {boolean} remove - Whether to remove modules instead of loading them.
+     * @returns {void}
+     */
+    _run_modprobe(modules, remove) {
+      if (modules.length === 0) {
+        this._log("No sound card kernel modules found");
+        this._schedule_update();
+        return;
+      }
+
+      let cmd = ["pkexec", this._get_modprobe_path()];
+      // pkexec fits GNOME's graphical auth flow; modprobe resolves module
+      // paths and dependencies better than calling insmod/rmmod directly.
+      if (remove) {
+        cmd.push("-r");
+      } else if (modules.length > 1) {
+        cmd.push("-a");
+      }
+      cmd.push(...modules);
+      this._run_command(cmd);
     }
 
     _update_icon(status) {
@@ -124,14 +398,25 @@ const Indicator = GObject.registerClass(
       this.last_status = status;
     }
 
-    _onToggle(menuItem, state) {
-      if (state) {
-        let cmd = ["pkexec", "tee", "/sys/bus/pci/rescan"];
-        this._write_command(cmd);
-      } else {
-        let cmd = ["pkexec", "tee", "/sys/class/sound/card0/device/remove"];
-        this._write_command(cmd);
-      }
+    /**
+     * Handle the user toggling the sound card switch.
+     *
+     * Example input: state false
+     * Example output: runs pkexec modprobe -r with active audio modules.
+     *
+     * Example input: state true
+     * Example output: runs pkexec modprobe with cached or candidate modules.
+     *
+     * @param {PopupMenu.PopupSwitchMenuItem} _menuItem - Switch menu item.
+     * @param {boolean} state - Desired enabled state after the toggle.
+     * @returns {void}
+     */
+    _onToggle(_menuItem, state) {
+      let moduleInfos = this._get_audio_module_infos();
+      let modules = state
+        ? this._get_loadable_modules(moduleInfos)
+        : this._get_active_modules(moduleInfos);
+      this._run_modprobe(modules, !state);
     }
   },
 );
