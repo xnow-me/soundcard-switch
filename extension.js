@@ -74,6 +74,30 @@ const Indicator = GObject.registerClass(
       );
     }
 
+    _notify_result(message) {
+      Main.notify(this.extensionObject.metadata.name, message);
+    }
+
+    _notify_operation_result(desiredState, actualState) {
+      if (actualState === desiredState) {
+        this._notify_result(`Sound card turned ${desiredState ? "on" : "off"}`);
+        return;
+      }
+
+      this._notify_result(
+        `Failed to turn sound card ${desiredState ? "on" : "off"}`,
+      );
+    }
+
+    _notify_operation_failed(desiredState, detail) {
+      let action = desiredState ? "on" : "off";
+      let message = `Failed to turn sound card ${action}`;
+      if (detail) {
+        message = `${message}: ${detail}`;
+      }
+      this._notify_result(message);
+    }
+
     _soundcard_status() {
       return GLib.file_test("/sys/class/sound/card0/", GLib.FileTest.IS_DIR);
     }
@@ -316,7 +340,7 @@ const Indicator = GObject.registerClass(
       );
     }
 
-    _schedule_update() {
+    _schedule_update(callback = null) {
       if (this._destroyed) {
         return;
       }
@@ -327,8 +351,11 @@ const Indicator = GObject.registerClass(
       // delay 1s, then update icon and toggle state
       // make sure the kernel module state has settled
       updateSourceId = GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT, 1, () => {
-        this._update_all();
+        let status = this._update_all();
         updateSourceId = null;
+        if (callback) {
+          callback(status);
+        }
         return GLib.SOURCE_REMOVE;
       });
     }
@@ -340,9 +367,10 @@ const Indicator = GObject.registerClass(
      * Example output: no direct return value; failed stderr/stdout is logged.
      *
      * @param {Array<string>} cmd - Command and arguments to execute.
+     * @param {boolean} desiredState - Expected sound card state after success.
      * @returns {void}
      */
-    _run_command(cmd) {
+    _run_command(cmd, desiredState) {
       let subprocess;
       try {
         subprocess = Gio.Subprocess.new(
@@ -351,6 +379,7 @@ const Indicator = GObject.registerClass(
         );
       } catch (e) {
         this._logException(e);
+        this._notify_operation_failed(desiredState, e.message);
         this._schedule_update();
         return;
       }
@@ -366,10 +395,19 @@ const Indicator = GObject.registerClass(
                 outputMessage ||
                 `Command failed with status ${proc.get_exit_status()}`,
             );
+            this._notify_operation_failed(
+              desiredState,
+              errorMessage || outputMessage,
+            );
+            this._schedule_update();
+            return;
           }
-          this._schedule_update();
+          this._schedule_update(status => {
+            this._notify_operation_result(desiredState, status);
+          });
         } catch (e) {
           this._logException(e);
+          this._notify_operation_failed(desiredState, e.message);
           this._schedule_update();
         }
       });
@@ -386,11 +424,13 @@ const Indicator = GObject.registerClass(
      *
      * @param {Array<string>} modules - Kernel modules to load or remove.
      * @param {boolean} remove - Whether to remove modules instead of loading them.
+     * @param {boolean} desiredState - Expected sound card state after success.
      * @returns {void}
      */
-    _run_modprobe(modules, remove) {
+    _run_modprobe(modules, remove, desiredState) {
       if (modules.length === 0) {
         this._log("No sound card kernel modules found");
+        this._notify_result("No sound card kernel modules found");
         this._schedule_update();
         return;
       }
@@ -404,7 +444,7 @@ const Indicator = GObject.registerClass(
         cmd.push("-a");
       }
       cmd.push(...modules);
-      this._run_command(cmd);
+      this._run_command(cmd, desiredState);
     }
 
     _update_icon(status) {
@@ -429,6 +469,7 @@ const Indicator = GObject.registerClass(
         this._log(msg);
       }
       this.last_status = status;
+      return status;
     }
 
     /**
@@ -453,7 +494,7 @@ const Indicator = GObject.registerClass(
         let modules = state
           ? this._get_loadable_modules(moduleInfos)
           : this._get_active_modules(moduleInfos);
-        this._run_modprobe(modules, !state);
+        this._run_modprobe(modules, !state, state);
       });
     }
   },
