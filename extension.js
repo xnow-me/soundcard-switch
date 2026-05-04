@@ -113,7 +113,14 @@ const Indicator = GObject.registerClass(
       return GLib.file_test("/sys/class/sound/card0/", GLib.FileTest.IS_DIR);
     }
 
-    _find_system_executable(paths) {
+    _get_command_path(commandName) {
+      let paths = [
+        `/usr/bin/${commandName}`,
+        `/bin/${commandName}`,
+        `/usr/sbin/${commandName}`,
+        `/sbin/${commandName}`,
+      ];
+
       for (let path of paths) {
         if (GLib.file_test(path, GLib.FileTest.IS_EXECUTABLE)) {
           return path;
@@ -123,73 +130,32 @@ const Indicator = GObject.registerClass(
       return null;
     }
 
-    _get_lspci_path() {
-      return this._find_system_executable([
-        "/usr/bin/lspci",
-        "/bin/lspci",
-        "/usr/sbin/lspci",
-        "/sbin/lspci",
-      ]);
-    }
-
-    _get_modprobe_path() {
-      return this._find_system_executable([
-        "/usr/sbin/modprobe",
-        "/sbin/modprobe",
-        "/usr/bin/modprobe",
-        "/bin/modprobe",
-      ]);
-    }
-
     /**
      * Run lspci asynchronously and pass the raw PCI device listing to callback.
-     *
-     * Example output:
-     * 0000:00:1f.3 Audio device: Intel Corporation Device 7a50
-     *     Kernel modules: snd_hda_intel
      *
      * @param {Function} callback - Function called with raw lspci output.
      * @returns {void}
      */
     _run_lspci(callback) {
-      let lspciPath = this._get_lspci_path();
+      let lspciPath = this._get_command_path("lspci");
       if (!lspciPath) {
         this._log("lspci executable not found in trusted system paths");
         callback("");
         return;
       }
 
-      let subprocess;
-      try {
-        subprocess = Gio.Subprocess.new(
-          [lspciPath, "-D", "-k"],
-          Gio.SubprocessFlags.STDOUT_PIPE | Gio.SubprocessFlags.STDERR_PIPE,
-        );
-      } catch (e) {
-        this._logException(e);
-        callback("");
-        return;
-      }
-
-      subprocess.communicate_utf8_async(null, null, (proc, res) => {
-        if (this._destroyed) {
-          return;
-        }
-
-        try {
-          let [, stdout, stderr] = proc.communicate_utf8_finish(res);
-          if (!proc.get_successful()) {
-            let errorMessage = stderr ? stderr.trim() : "";
-            this._log(errorMessage || "Failed to list PCI devices");
+      this._run_command_for_result(
+        [lspciPath, "-D", "-k"],
+        (success, stdout, stderr, status) => {
+          if (!success) {
+            this._log(this._format_command_failure(stdout, stderr, status));
             callback("");
             return;
           }
-          callback(stdout || "");
-        } catch (e) {
-          this._logException(e);
-          callback("");
-        }
-      });
+
+          callback(stdout);
+        },
+      );
     }
 
     /**
@@ -198,16 +164,6 @@ const Indicator = GObject.registerClass(
      * activeModule comes from sysfs, while candidateModules comes from the
      * lspci "Kernel modules" line. Only PCI devices whose lspci header line
      * contains "audio" are included.
-     *
-     * Example output:
-     * [
-     *   {
-     *     activeModule: "snd_hda_intel",
-     *     candidateModules: ["snd_hda_intel"],
-     *     deviceName: "Audio device: Intel Corporation Device 7a50",
-     *     pciAddress: "0000:00:1f.3",
-     *   },
-     * ]
      *
      * @param {string} lspciOutput - Raw lspci output.
      * @returns {Array<Object>} Audio device records with active and candidate modules.
@@ -261,9 +217,6 @@ const Indicator = GObject.registerClass(
     /**
      * Get audio device module records asynchronously.
      *
-     * Example output:
-     * [{activeModule: "snd_hda_intel", candidateModules: ["snd_hda_intel"]}]
-     *
      * @param {Function} callback - Function called with audio module records.
      * @returns {void}
      */
@@ -280,9 +233,6 @@ const Indicator = GObject.registerClass(
 
     /**
      * Read the active kernel module for one PCI device from sysfs.
-     *
-     * Example input: 0000:00:1f.3
-     * Example output: snd_hda_intel
      *
      * @param {string} pciAddress - Full PCI address from lspci -D output.
      * @returns {string|null} Active module name, or null if no module link exists.
@@ -310,14 +260,171 @@ const Indicator = GObject.registerClass(
       });
     }
 
+    _format_command_failure(stdout, stderr, status) {
+      let errorMessage = stderr ? stderr.trim() : "";
+      let outputMessage = stdout ? stdout.trim() : "";
+
+      return (
+        errorMessage ||
+        outputMessage ||
+        `Command failed with status ${status}`
+      );
+    }
+
+    _run_command_for_result(cmd, callback) {
+      let subprocess;
+      try {
+        subprocess = Gio.Subprocess.new(
+          cmd,
+          Gio.SubprocessFlags.STDOUT_PIPE | Gio.SubprocessFlags.STDERR_PIPE,
+        );
+      } catch (e) {
+        this._logException(e);
+        callback(false, "", e.message, -1);
+        return;
+      }
+
+      subprocess.communicate_utf8_async(null, null, (proc, res) => {
+        if (this._destroyed) {
+          return;
+        }
+
+        try {
+          let [, stdout, stderr] = proc.communicate_utf8_finish(res);
+          callback(
+            proc.get_successful(),
+            stdout || "",
+            stderr || "",
+            proc.get_exit_status(),
+          );
+        } catch (e) {
+          this._logException(e);
+          callback(false, "", e.message, -1);
+        }
+      });
+    }
+
+    _card_matches_pci_address(card, pciAddress) {
+      let normalizedPciAddress = pciAddress.replace(/:/g, "_");
+      let matchTokens = [
+        pciAddress,
+        normalizedPciAddress,
+        `pci-${normalizedPciAddress}`,
+      ];
+
+      if (card.name && matchTokens.some(token => card.name.includes(token))) {
+        return true;
+      }
+
+      let properties = card.properties || {};
+      for (let key in properties) {
+        let value = properties[key];
+        if (typeof value !== "string") {
+          continue;
+        }
+
+        if (matchTokens.some(token => value.includes(token))) {
+          return true;
+        }
+      }
+
+      return false;
+    }
+
+    _get_pactl_cards(pactlPath, callback) {
+      this._run_command_for_result(
+        [pactlPath, "--format=json", "list", "cards"],
+        (success, stdout, stderr, status) => {
+          if (!success) {
+            this._log(this._format_command_failure(stdout, stderr, status));
+            callback([]);
+            return;
+          }
+
+          try {
+            let cards = JSON.parse(stdout || "[]");
+            if (!Array.isArray(cards)) {
+              this._log("pactl returned an unexpected cards payload");
+              callback([]);
+              return;
+            }
+
+            callback(cards);
+          } catch (e) {
+            this._log(`Failed to parse pactl cards: ${e.message}`);
+            callback([]);
+          }
+        },
+      );
+    }
+
+    _get_matching_pactl_card_names(cards, moduleInfos) {
+      let cardNames = [];
+      let pciAddresses = this._unique_modules(
+        moduleInfos
+          .map(moduleInfo => moduleInfo.pciAddress)
+          .filter(pciAddress => pciAddress),
+      );
+
+      for (let pciAddress of pciAddresses) {
+        for (let card of cards) {
+          if (!card.name || !this._card_matches_pci_address(card, pciAddress)) {
+            continue;
+          }
+
+          cardNames.push(card.name);
+        }
+      }
+
+      return this._unique_modules(cardNames);
+    }
+
+    _set_pactl_cards_off(pactlPath, cardNames, index, callback) {
+      if (index >= cardNames.length) {
+        callback(true, "");
+        return;
+      }
+
+      this._run_command_for_result(
+        [pactlPath, "set-card-profile", cardNames[index], "off"],
+        (success, stdout, stderr, status) => {
+          if (!success) {
+            let detail = this._format_command_failure(stdout, stderr, status);
+            this._log(detail);
+            callback(false, detail);
+            return;
+          }
+
+          this._set_pactl_cards_off(pactlPath, cardNames, index + 1, callback);
+        },
+      );
+    }
+
+    _turn_off_pactl_cards(moduleInfos, callback) {
+      let pactlPath = this._get_command_path("pactl");
+      if (!pactlPath) {
+        this._log("pactl executable not found in trusted system paths");
+        callback(true, "");
+        return;
+      }
+
+      this._get_pactl_cards(pactlPath, cards => {
+        let cardNames = this._get_matching_pactl_card_names(cards, moduleInfos);
+        if (cardNames.length === 0) {
+          this._log("No matching pactl cards found");
+          callback(true, "");
+          return;
+        }
+
+        this._set_pactl_cards_off(pactlPath, cardNames, 0, callback);
+      });
+    }
+
     /**
      * Get currently active audio modules from parsed audio device records.
      *
      * Non-empty output is cached in lastActiveModules so the extension can
      * later reload the same modules after they have been removed.
-     *
-     * Example input: [{activeModule: "snd_hda_intel"}, {activeModule: null}]
-     * Example output: ["snd_hda_intel"]
      *
      * @param {Array<Object>} moduleInfos - Audio device records.
      * @returns {Array<string>} Unique active module names.
@@ -339,10 +446,6 @@ const Indicator = GObject.registerClass(
      *
      * If modules were previously active, they are reused. Otherwise this
      * falls back to all modules listed in each device's candidateModules.
-     *
-     * Example input:
-     * [{candidateModules: ["snd_hda_intel", "snd_soc_avs"]}]
-     * Example output when no cache exists: ["snd_hda_intel", "snd_soc_avs"]
      *
      * @param {Array<Object>} moduleInfos - Audio device records.
      * @returns {Array<string>} Unique module names to pass to modprobe.
@@ -391,75 +494,35 @@ const Indicator = GObject.registerClass(
     /**
      * Run a command asynchronously, log failures, and refresh the UI afterward.
      *
-     * Example input: ["pkexec", "modprobe", "-r", "snd_hda_intel"]
-     * Example output: no direct return value; failed stderr/stdout is logged.
-     *
      * @param {Array<string>} cmd - Command and arguments to execute.
      * @param {boolean} desiredState - Expected sound card state after success.
      * @returns {void}
      */
     _run_command(cmd, desiredState) {
-      let subprocess;
-      try {
-        subprocess = Gio.Subprocess.new(
-          cmd,
-          Gio.SubprocessFlags.STDOUT_PIPE | Gio.SubprocessFlags.STDERR_PIPE,
-        );
-      } catch (e) {
-        this._logException(e);
-        this._notify_operation_failed(desiredState, e.message);
-        this._schedule_update();
-        return;
-      }
-
-      subprocess.communicate_utf8_async(null, null, (proc, res) => {
-        if (this._destroyed) {
+      this._run_command_for_result(cmd, (success, stdout, stderr, status) => {
+        if (!success) {
+          let detail = this._format_command_failure(stdout, stderr, status);
+          this._log(detail);
+          this._notify_operation_failed(desiredState, detail);
+          this._schedule_update();
           return;
         }
 
-        try {
-          let [, stdout, stderr] = proc.communicate_utf8_finish(res);
-          if (!proc.get_successful()) {
-            let errorMessage = stderr ? stderr.trim() : "";
-            let outputMessage = stdout ? stdout.trim() : "";
-            this._log(
-              errorMessage ||
-                outputMessage ||
-                `Command failed with status ${proc.get_exit_status()}`,
-            );
-            this._notify_operation_failed(
-              desiredState,
-              errorMessage || outputMessage,
-            );
-            this._schedule_update();
-            return;
-          }
-          this._schedule_update(status => {
-            this._notify_operation_result(desiredState, status);
-          });
-        } catch (e) {
-          this._logException(e);
-          this._notify_operation_failed(desiredState, e.message);
-          this._schedule_update();
-        }
+        this._schedule_update(actualState => {
+          this._notify_operation_result(desiredState, actualState);
+        });
       });
     }
 
     /**
      * Build and run the privileged modprobe command for audio modules.
      *
-     * Example input: modules ["snd_hda_intel"], remove true
-     * Example command: ["pkexec", "/usr/sbin/modprobe", "-r", "snd_hda_intel"]
-     *
-     * Example input: modules ["snd_hda_intel", "snd_soc_avs"], remove false
-     * Example command: ["pkexec", "/usr/sbin/modprobe", "-a", "snd_hda_intel", "snd_soc_avs"]
-     *
      * @param {Array<string>} modules - Kernel modules to load or remove.
-     * @param {boolean} remove - Whether to remove modules instead of loading them.
+     * @param {Array<string>} args - modprobe operation arguments.
      * @param {boolean} desiredState - Expected sound card state after success.
      * @returns {void}
      */
-    _run_modprobe(modules, remove, desiredState) {
+    _run_modprobe(modules, args, desiredState) {
       if (modules.length === 0) {
         this._log("No sound card kernel modules found");
         this._notify_result("No sound card kernel modules found");
@@ -467,7 +530,7 @@ const Indicator = GObject.registerClass(
         return;
       }
 
-      let modprobePath = this._get_modprobe_path();
+      let modprobePath = this._get_command_path("modprobe");
       if (!modprobePath) {
         this._log("modprobe executable not found in trusted system paths");
         this._notify_result("modprobe executable not found");
@@ -478,13 +541,39 @@ const Indicator = GObject.registerClass(
       let cmd = ["pkexec", modprobePath];
       // pkexec fits GNOME's graphical auth flow; modprobe resolves module
       // paths and dependencies better than calling insmod/rmmod directly.
-      if (remove) {
-        cmd.push("-r");
-      } else if (modules.length > 1) {
-        cmd.push("-a");
-      }
+      cmd.push(...args);
       cmd.push(...modules);
       this._run_command(cmd, desiredState);
+    }
+
+    _load_modules(modules) {
+      let args = modules.length > 1 ? ["-a"] : [];
+      this._run_modprobe(modules, args, true);
+    }
+
+    _remove_modules(modules) {
+      this._run_modprobe(modules, ["-r"], false);
+    }
+
+    _run_remove_flow(modules, moduleInfos) {
+      if (modules.length === 0) {
+        this._remove_modules(modules);
+        return;
+      }
+
+      this._turn_off_pactl_cards(moduleInfos, (success, detail) => {
+        if (this._destroyed) {
+          return;
+        }
+
+        if (!success) {
+          this._notify_operation_failed(false, detail);
+          this._schedule_update();
+          return;
+        }
+
+        this._remove_modules(modules);
+      });
     }
 
     _update_icon(status) {
@@ -515,12 +604,6 @@ const Indicator = GObject.registerClass(
     /**
      * Handle the user toggling the sound card switch.
      *
-     * Example input: state false
-     * Example output: runs pkexec modprobe -r with active audio modules.
-     *
-     * Example input: state true
-     * Example output: runs pkexec modprobe with cached or candidate modules.
-     *
      * @param {PopupMenu.PopupSwitchMenuItem} _menuItem - Switch menu item.
      * @param {boolean} state - Desired enabled state after the toggle.
      * @returns {void}
@@ -534,7 +617,12 @@ const Indicator = GObject.registerClass(
         let modules = state
           ? this._get_loadable_modules(moduleInfos)
           : this._get_active_modules(moduleInfos);
-        this._run_modprobe(modules, !state, state);
+        if (state) {
+          this._load_modules(modules);
+          return;
+        }
+
+        this._run_remove_flow(modules, moduleInfos);
       });
     }
   },
